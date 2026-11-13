@@ -1,0 +1,22 @@
+# Build and local configuration
+.gradle/
+**/build/
+local.properties
+.env*
+# Credentials and private exports
+*.jks
+*.keystore
+*.pem
+*.p12
+*.pfx
+*service-account*.json
+*credentials*.json
+*.apk
+*.aab
+*.zip
+*.tar*
+*.b64
+backups/
+zhiyi-backups/
+exports/
+downloads/

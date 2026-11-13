@@ -1,0 +1,44 @@
+const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict'),path=require('path');
+const tables=Object.fromEntries(['sessions','messages','summaries','statusCards','chunks','vectors','settings','assets'].map(t=>[t,new Map()]));
+const Store={get:async(t,id)=>tables[t].get(id),put:async(t,item)=>tables[t].set(item.id||item.key,item),del:async(t,id)=>tables[t].delete(id),all:async t=>[...tables[t].values()],inSession:async(t,id)=>[...tables[t].values()].filter(x=>x.sessionId===id),orderedMessages:async id=>[...tables.messages.values()].filter(x=>x.sessionId===id).sort((a,b)=>a.ordinal-b.ordinal),getSetting:async(k,d)=>tables.settings.get(k)?.value??d,setSetting:async(k,v)=>tables.settings.set(k,{key:k,value:v}),putSummaryAtomic:async(s,c)=>{tables.summaries.set(s.id,s);tables.chunks.set(c.id,c);}};
+const sent='<<ZHIYI_ARCHIVE_DONE_V19>>';let totalRequests=0,firstCalls=0,continuations=0,forceNeverFinish=false,refusePolicy=false,failOnPart=false,failAfter=Infinity;
+const win={};win.NativeBridge={request(id,url,method,headers,json){totalRequests++;const data=JSON.parse(json);const source=data.messages.at(-1).content;const continuing=source.includes('【已完成摘要的末尾');
+ if(refusePolicy){win.__nativeResponse(id,502,JSON.stringify({error:{code:'upstream_error',message:'prohibited_content'}}),'');return;}
+ if(failOnPart&&totalRequests>=failAfter){win.__nativeResponse(id,502,JSON.stringify({error:{code:'upstream_error',message:'unexpected EOF'}}),'');return;}
+ const content=continuing?(continuations++,'承接上一段，事件最后完成。'+(forceNeverFinish?'':sent)):(firstCalls++,'【重大事件】最初发生，主要人物确立关系，后');
+ win.__nativeResponse(id,200,JSON.stringify({choices:[{finish_reason:continuing?'stop':'length',message:{content}}]}),null);
+}};
+const ctx={Store,window:win,console,Math,JSON,Date,Promise,Uint8Array,Float32Array,Blob,setTimeout,clearTimeout,crypto:require('crypto').webcrypto};ctx.globalThis=ctx;
+vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../web/engine.js'),'utf8')+';globalThis.Engine=Engine;',ctx);
+(async()=>{
+ const E=ctx.Engine;let c=await E.settings();await E.saveSettings({...c,chat:{...c.chat,url:'http://127.0.0.1:2048/v1',model:'mock'},summary:{url:'http://127.0.0.1:2048/v1',model:'mock',maxTokens:550}});
+ const sid='chat';await Store.put('sessions',{id:sid,name:'history',memory:{backfillBatchSize:20}});
+ for(let n=1;n<=23;n++)await Store.put('messages',{id:'m'+n,sessionId:sid,ordinal:n,role:n%2?'user':'assistant',content:'书院第'+n+'条往事，人物与约定发展。'});
+ const p=await E.summarize(sid,true,{backfill:true,maxMessages:20,maxBlockChars:1900});
+ assert.equal(p.summary.startOrdinal,1);assert.equal(p.summary.endOrdinal,20);assert.equal(p.summary.completionVerified,true);
+ assert.ok(p.summary.continuationCalls>p.summary.verifiedParts);assert.ok(continuations>=1,'must continue truncated response');
+ assert.ok(p.summary.content.includes('事件最后完成'));assert.ok(!p.summary.content.includes(sent),'completion marker must not leak to archive');
+ assert.equal((await E.backfillPlan(sid)).covered,20);
+ const r2=await E.summarize(sid,true,{backfill:true,maxMessages:20});assert.equal(r2.summary.messageCount,3);assert.equal((await E.backfillPlan(sid)).remaining,0);
+ const before=totalRequests;forceNeverFinish=true;
+ const sid2='failed';await Store.put('sessions',{id:sid2});await Store.put('messages',{id:'noend1',sessionId:sid2,ordinal:1,role:'user',content:'断开前的历史内容'});
+ await assert.rejects(E.summarize(sid2,true,{backfill:true,maxMessages:20}),/持续被截断/);
+ assert.equal((await Store.inSession('summaries',sid2)).length,0,'without completion marker must not archive');
+ assert.ok(totalRequests-before>=7,'continuation retries should happen');forceNeverFinish=false;
+ const legacy={id:'old1',sessionId:sid,createdAt:'2026-11-05T00:00:00',startOrdinal:1,endOrdinal:20,sourceIds:Array.from({length:20},(_,n)=>'m'+(n+1)),content:'前一版本只写了开头就',model:'mock',version:1};
+ await Store.put('summaries',legacy);
+ const edited=await E.repairSummary(sid,'old1');assert.equal(edited.summary.completionVerified,true);
+ assert.equal(edited.summary.previousVersions[0].content,'前一版本只写了开头就');assert.equal(edited.summary.id,'old1');assert.equal(edited.summary.repairCount,1);
+ assert.equal((await Store.get('chunks','summary:old1')).text,edited.summary.content,'search index synced');
+ const errorBefore=edited.summary.content;const old2={id:'old2',sessionId:sid,startOrdinal:21,endOrdinal:23,content:'旧版截断内容',sourceIds:['m21','m22','m23']};await Store.put('summaries',old2);
+ refusePolicy=true;
+ await assert.rejects(E.repairSummary(sid,'old2'),/prohibited_content/);
+ assert.equal((await Store.get('summaries','old2')).content,'旧版截断内容','policy refusal must preserve old text');
+ assert.equal((await Store.get('summaries','old1')).content,errorBefore,'previously repaired summary stays');
+ assert.equal(E.summaryNeedsReview(old2),true);assert.equal(E.summaryNeedsReview(edited.summary),false);
+ const ui=fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8');
+ assert.ok(ui.includes('repair-old-summaries')&&ui.includes('repair-single-summary'));
+ assert.ok(ui.includes('完成这一份才能继续下一份'));
+ for(const f of ['app','engine','db'])assert.equal(fs.readFileSync(path.join(__dirname,'../web',f+'.js'),'utf8'),fs.readFileSync(path.join(__dirname,'../app/src/main/assets',f+'.js'),'utf8'));
+ console.log('PASS v1.9: output-limit continuation, verified-only atomic archives, preserved old versions, serial historical repair and policy refusal safety. Requests:',totalRequests);
+})().catch(e=>{console.error(e);process.exitCode=1});

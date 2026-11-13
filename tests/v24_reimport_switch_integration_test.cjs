@@ -1,0 +1,26 @@
+const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict'),path=require('node:path');
+const engine=fs.readFileSync(path.join(__dirname,'../web/engine.js'),'utf8');
+const start=engine.indexOf('function safeText('),end=engine.indexOf('function resolveSessionObjects(');
+const data={sessions:new Map(),messages:new Map(),chunks:new Map(),summaries:new Map()};
+const key=t=>data[t];
+const Store={async get(t,id){return key(t).get(id);},async put(t,item){key(t).set(item.id,item);},async putMany(t,items){for(const x of items)key(t).set(x.id,x);},async del(t,id){key(t).delete(id);},async inSession(t,id){return [...key(t).values()].filter(x=>x.sessionId===id);},async all(t){return [...key(t).values()];}};
+const c=vm.createContext({Date,Number,Object,Array,Math,String,Map,Set,now:()=>new Date('2026-11-09T00:00:00Z').toISOString(),Store,hashedVec:()=>null});vm.runInContext(engine.slice(start,end),c);
+const mk=(id,role,content)=>({id,role,content,createdAt:1762700000000});
+const old={id:'s1',name:'历史',messages:[mk('u1','user','开始'),mk('a1','assistant','默认'),mk('u2','user','继续'),mk('a2','assistant','正常续聊')]};
+const graph={...old,messageForksHash:{u1:{position:1,lists:[{id:'branch1',messages:[mk('alt','assistant','备用回复'),mk('alt-u','user','备用提问'),mk('alt-a','assistant','备用后续')]},{id:'branch2',messages:[]}],createdAt:1762700000000}}};
+(async()=>{
+ const entry=(obj)=>[{value:obj,path:'sessions/s1/session.json'}];
+ let result=await c.importSessions(entry(old));assert.equal(result.added,1);assert.equal(Store.inSession('messages','chatbox:s1').then(v=>v.length) instanceof Promise,true);
+ result=await c.importSessions(entry(graph));assert.equal(result.repaired,1);assert.equal(result.forks,1);
+ let s=await Store.get('sessions','chatbox:s1');assert.equal(s.chatboxForkGraphVersion,2);
+ let arr=(await Store.inSession('messages','chatbox:s1')).sort((a,b)=>a.ordinal-b.ordinal);
+ assert.equal(arr[1].branchVariants.length,2);assert.equal(arr[1].content,'默认');
+ let switched=await c.switchChatboxBranch('chatbox:s1','u1',0);assert.equal(switched.position,0);
+ arr=(await Store.inSession('messages','chatbox:s1')).sort((a,b)=>a.ordinal-b.ordinal);
+ assert.deepEqual(arr.map(x=>x.content),['开始','备用回复','备用提问','备用后续']);
+ switched=await c.switchChatboxBranch('chatbox:s1','u1',1);assert.equal(switched.position,1);
+ arr=(await Store.inSession('messages','chatbox:s1')).sort((a,b)=>a.ordinal-b.ordinal);
+ assert.deepEqual(arr.map(x=>x.content),['开始','默认','继续','正常续聊']);
+ result=await c.importSessions(entry(graph));assert.equal(result.skipped,1);
+ console.log('PASS v2.4: import existing Chatbox, upgrade/re-import, preserve two branches and correct follow-up route, no duplicates');
+})().catch(e=>{console.error(e);process.exit(1)});

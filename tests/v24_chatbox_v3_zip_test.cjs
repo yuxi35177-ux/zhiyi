@@ -1,0 +1,10 @@
+const fs=require('fs'),vm=require('vm'),assert=require('node:assert/strict'),path=require('path'),JSZip=require('../web/vendor/jszip.min.js');
+const s=fs.readFileSync(path.resolve(__dirname,'../web/engine.js'),'utf8');const part=s.slice(s.indexOf('function safeText('),s.indexOf('function chunkFor('));
+const c=vm.createContext({Date,Number,Object,Array,Math,String,Map,Set,now:()=>new Date().toISOString()});vm.runInContext(part,c);
+const fake={Engine:{chatboxV3ToSession:c.chatboxV3ToSession,sourcePin:c.sourcePin,sourceTime:c.sourceTime},JSZip,SQLiteReader:{},Store:{},Date,Number,Object,Array,Math,String,Map,Set};vm.createContext(fake);
+vm.runInContext(fs.readFileSync(path.resolve(__dirname,'../web/importer.js'),'utf8')+'\nthis.Importer=Importer;',fake);
+const mk=(id,role,content)=>({id,role,contentParts:[{type:'text',text:content}],timestamp:1762600000000});
+const row=(id,parent,selected,order,role,txt)=>({type:'message',message:{sessionId:'v3-test',threadId:'thread-1',messageId:id,parentMessageId:parent,activeChildId:selected,siblingOrder:order,kind:'message',createdAt:1762600000000,updatedAt:1762600000000,branchId:null,message:mk(id,role,txt)}});
+const lines=[{type:'session',session:{id:'v3-test',name:'测试',activeThreadId:'thread-1',starred:true}},{type:'thread',thread:{sessionId:'v3-test',threadId:'thread-1',rootMessageId:'prompt',threadOrder:-1}},row('prompt',null,'reply2',0,'user','问题'),row('reply1','prompt',null,0,'assistant','第一个版本'),row('reply2','prompt',null,1,'assistant','第二个版本')];
+(async()=>{const z=new JSZip();z.file('manifest.json',JSON.stringify({format:'chatbox-backup',formatVersion:3}));z.file('sessions/v3-test.jsonl',lines.map(x=>JSON.stringify(x)).join('\n'));
+const bytes=await z.generateAsync({type:'nodebuffer'});bytes.name='chatbox2026.zip';const prepared=await fake.Importer.prepare(bytes);assert.equal(prepared.type,'chatbox-v3');assert.equal(prepared.sessions[0].branchCount,1);assert.equal(prepared.sessions[0].pinned,true);console.log('PASS Chatbox official-format v3 ZIP preview');})().catch(e=>{console.error(e);process.exit(1)});
